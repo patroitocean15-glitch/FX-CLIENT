@@ -1,0 +1,103 @@
+# Bu dosya repoda tam olarak şu yolda durmalı:  .github/workflows/build.yml
+# Görevi: FX Client'ı GitHub'ın sunucusunda derlemek ve çıkan .jar'ı "Releases" sayfasına koymak.
+name: FX Client build
+
+on:
+  # Repoya her dosya yüklediğinde (commit) otomatik çalışır
+  push:
+    branches: ['**']
+  # Actions sekmesinden "Run workflow" ile elle de çalıştırılabilir
+  workflow_dispatch:
+
+# Release oluşturabilmek için yazma izni gerekir
+permissions:
+  contents: write
+
+# Aynı anda iki derleme çalışırsa eskisini iptal et
+concurrency:
+  group: fxclient-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # 1) Repodaki dosyaları (ve commit geçmişini) sunucuya indir
+      - name: Kodu indir
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 2) Proje klasör olarak mı yüklendi, zip olarak mı? Zip varsa EN SON yüklenen zip kullanılır
+      - name: Projeyi bul
+        run: |
+          set -e
+          if [ -f build.gradle ]; then
+            DIR="."
+          else
+            ZIP=""
+            BEST=-1
+            for z in ./*.zip; do
+              [ -e "$z" ] || continue
+              T=$(git log -1 --format=%ct -- "$z" 2>/dev/null || echo 0)
+              T=${T:-0}
+              if [ "$T" -ge "$BEST" ]; then
+                BEST=$T
+                ZIP="$z"
+              fi
+            done
+            if [ -z "$ZIP" ]; then
+              echo "::error::Repoda ne build.gradle ne de .zip var. FXClient-1.21.11-src.zip dosyasını repoya yükle."
+              exit 1
+            fi
+            echo "Kullanılan zip: $ZIP"
+            mkdir -p _src
+            unzip -q "$ZIP" -d _src
+            BG=$(find _src -maxdepth 3 -name build.gradle | head -n1)
+            if [ -z "$BG" ]; then
+              echo "::error::Zip içinde build.gradle bulunamadı."
+              exit 1
+            fi
+            DIR=$(dirname "$BG")
+          fi
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+          echo "Proje klasörü: $DIR"
+
+      # 3) Minecraft 1.21.11 Java 21 ister
+      - name: Java 21 kur
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # 4) Gradle kur (wrapper dosyası gerekmez); indirilenleri önbelleğe alır
+      - name: Gradle 9.2.1 kur
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.2.1'
+
+      # 5) Derle: Minecraft, Fabric ve eşleme dosyalarını indirir, kodu derler, jar'ı üretir
+      - name: Derle
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -o pipefail
+          gradle build --no-daemon --stacktrace 2>&1 | tee build.log
+
+      # 6) Derleme başarısızsa: hata satırlarını çalışma özetine yaz
+      - name: Hata özeti
+        if: failure()
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          {
+            echo "## Derleme başarısız"
+            echo "Aşağıdaki kutunun içindekini kopyalayıp Claude'a yapıştır:"
+            echo '```'
+            grep -n -E "error:|What went wrong|Could not|FAILED|Execution failed|Unsupported|Mixin" -A3 build.log | head -n 120
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY" || true
+
+      # 7) Başarısızsa tam log dosyasını da sakla (Actions sayfasından indirilir)
+... (43 satır kaldı)
+
+build-5.yml
